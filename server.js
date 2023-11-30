@@ -2,27 +2,41 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const mongoose = require('mongoose');
+const passport = require('passport');
+const LocalStrategy = require('passport-local').Strategy;
+const session = require('express-session');
+const passportLocalMongoose = require('passport-local-mongoose');
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server);
 
-// Connect to MongoDB (you need to have MongoDB installed locally or use a cloud service)
+app.use(session({ secret: 'secret', resave: false, saveUninitialized: false }));
+app.use(passport.initialize());
+app.use(passport.session());
+
 mongoose.connect('mongodb://localhost:27017/mychatapp', { useNewUrlParser: true, useUnifiedTopology: true });
 
-// Define a simple schema for messages
-const messageSchema = new mongoose.Schema({
-  user: String,
-  content: String,
-  timestamp: { type: Date, default: Date.now }
+const userSchema = new mongoose.Schema({
+  username: String,
+  password: String,
 });
 
-const Message = mongoose.model('Message', messageSchema);
+userSchema.plugin(passportLocalMongoose);
+
+const User = mongoose.model('User', userSchema);
+
+passport.use(new LocalStrategy(User.authenticate()));
+passport.serializeUser(User.serializeUser());
+passport.deserializeUser(User.deserializeUser());
+
+io.use((socket, next) => {
+  sessionMiddleware(socket.request, {}, next);
+});
 
 io.on('connection', (socket) => {
-  console.log('User connected');
+  console.log('User connected:', socket.request.user);
 
-  // Listen for messages
   socket.on('message', async (data) => {
     const { user, content } = data;
     const message = new Message({ user, content });
@@ -30,14 +44,32 @@ io.on('connection', (socket) => {
     io.emit('message', message);
   });
 
-  // Listen for disconnection
   socket.on('disconnect', () => {
-    console.log('User disconnected');
+    console.log('User disconnected:', socket.request.user);
   });
 });
 
-// Serve static files (e.g., HTML, CSS, client-side JS)
-app.use(express.static('public'));
+// Add authentication routes and middleware
+app.post('/login', passport.authenticate('local'), (req, res) => {
+  res.sendStatus(200);
+});
+
+app.post('/register', async (req, res) => {
+  const { username, password } = req.body;
+  try {
+    const user = await User.register(new User({ username }), password);
+    passport.authenticate('local')(req, res, () => {
+      res.sendStatus(200);
+    });
+  } catch (err) {
+    res.status(500).send(err.message);
+  }
+});
+
+app.get('/logout', (req, res) => {
+  req.logout();
+  res.sendStatus(200);
+});
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
